@@ -1,0 +1,232 @@
+**Design and Development of Secure CI/CD Pipeline using Jenkins for OWASP Juiceshop Application**
+
+# **Introduction**
+
+## **1. Overview of DevSecOps**
+DevSecOps integrates security practices within the DevOps lifecycle, ensuring that security is an ongoing and automated process rather than an isolated phase. The goal of DevSecOps is to integrate security measures early in the software development life cycle (SDLC), reducing vulnerabilities and enhancing software reliability.
+
+## **2. Importance of CI/CD Pipelines in Secure Software Development**
+A Continuous Integration/Continuous Deployment (CI/CD) pipeline automates the software development, testing, and deployment processes. Implementing security tools within this pipeline ensures vulnerabilities are detected and mitigated before deployment, reducing security risks and improving software quality.
+
+# **Phase 1: Initial Setup and Deployment**
+
+## **1. Setting up a Virtual Machine (VM)**
+A VM running Ubuntu 24.04/22.04 with the following minimum specifications is required:
+- **CPU**: 2 Cores
+- **RAM**: 8 GB
+
+### **Step 1: Updating the System**
+```bash
+sudo apt update
+sudo apt upgrade
+```
+
+### **Step 2: Installing Git**
+```bash
+sudo apt install git-all
+```
+
+### **Step 3: Cloning the Juice Shop Application**
+```bash
+git clone https://github.com/musfiqur-m/juice-shop
+```
+
+### **Step 4: Installing Docker and Running the Application**
+```bash
+sudo apt-get install docker.io -y
+sudo usermod -aG docker $USER
+newgrp docker
+sudo chmod 777 /var/run/docker.sock
+```
+
+Building and running the application as a container:
+```bash
+cd juice-shop/
+docker build -t juice-shop .
+docker run -d --name juice-shop -p 3000:3000 juice-shop:latest
+```
+To stop and remove the container:
+```bash
+docker stop <container_id>
+docker rm <container_id>
+```
+
+# **Phase 2: Security Implementation**
+
+## **1. Static Application Security Testing (SAST) with SonarQube**
+SAST analyzes source code for vulnerabilities without executing the application.
+
+### **Installing and Running SonarQube**
+```bash
+docker run -d --name sonar -p 9000:9000 sonarqube:lts-community
+```
+Access via:
+```
+http://localhost:9000 (default credentials: admin/admin)
+```
+
+## **2. Software Composition Analysis (SCA) with OWASP Dependency-Check**
+SCA scans dependencies for known vulnerabilities.
+
+### **Installing OWASP Dependency-Check**
+1. Install the OWASP Dependency-Check plugin in Jenkins.
+2. Configure the tool in **Manage Jenkins → Global Tool Configuration**.
+
+## **3. File System and Container Scanning with Trivy**
+Trivy scans for vulnerabilities in file systems and container images.
+
+### **Installing Trivy**
+```bash
+sudo apt-get install wget apt-transport-https gnupg lsb-release
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+sudo apt-get update
+sudo apt-get install trivy
+```
+
+To scan a Docker image:
+```bash
+trivy image <image_id>
+```
+
+# **Phase 3: CI/CD Pipeline Setup**
+
+## **1. Installing Jenkins**
+### **Installing Java and Jenkins**
+```bash
+sudo apt install fontconfig openjdk-17-jre
+sudo wget -O /usr/share/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/ | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+sudo apt-get update
+sudo apt-get install jenkins
+sudo systemctl start jenkins
+sudo systemctl enable jenkins
+```
+
+Access Jenkins via:
+```
+http://localhost:8080
+```
+Retrieve initial password:
+```bash
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+
+## **2. Configuring Jenkins and Plugins**
+- Install required plugins:
+  - Eclipse Temurin Installer
+  - Node.js Plugin
+- Configure Java and Node.js in **Global Tool Configuration**:
+  - Java: JDK 17
+  - Node.js: Version 20
+
+## **3. Configuring SonarQube in Jenkins**
+1. Generate a token in SonarQube.
+2. Add the token in Jenkins credentials.
+3. Configure **Manage Jenkins → System → SonarQube Server**.
+4. Configure **Manage Jenkins → Tools → SonarQube Scanner**.
+
+## **4. Configuring Dependency-Check and Docker in Jenkins**
+1. Install OWASP Dependency-Check Plugin.
+2. Install Docker-related plugins in Jenkins:
+   - Docker
+   - Docker Commons
+   - Docker Pipeline
+   - Docker API
+   - Docker Build Step
+3. Add DockerHub credentials in Jenkins.
+
+# **Pipeline Code for Secure CI/CD**
+```groovy
+pipeline{
+    agent any
+    tools{
+        jdk 'jdk17'
+        nodejs 'node20'
+    }
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+    }
+    stages {
+        stage('Clean Workspace'){
+            steps{
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git'){
+            steps{
+                git branch: 'master', url: 'https://github.com/musfiqur-m/juice-shop.git'
+            }
+        }
+        stage("SAST - SonarQube"){
+            steps{
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Juice-shop \
+                    -Dsonar.projectKey=Juice-shop '''
+                }
+            }
+        }
+        /*stage("quality gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
+                }
+            } 
+        }*/
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('SCA - Dependency Check') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('File System Scan - Trivy') {
+            steps {
+                sh "trivy fs -f json -o File_System_Scan_Report_Trivy.json ."
+            }
+        }
+        stage("Docker Build & Push"){
+            steps{
+                script{
+                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){   
+                       sh "docker build --no-cache -t docker_username/juice-shop:latest ."
+                       sh "docker push docker_username/juice-shop:latest"
+                    }
+                }
+            }
+        }
+        stage("Container Scan - Trivy"){
+            steps{
+                sh "wget https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -P contrib/"
+                sh "trivy image --format template --template \"@contrib/html.tpl\" -o Container_Scan_Report_Trivy.html musfiqur97/juice-shop:latest" 
+            }
+        }
+        stage('Deploy Container'){
+            steps{
+                sh 'docker run -d -p 3000:3000 docker_username/juice-shop:latest'
+            }
+        }
+        stage('DAST - OWASP ZAP'){
+            steps{
+                sh "chmod 777 \$(pwd)"
+                sh "docker run --rm -v \$(pwd):/zap/wrk/:rw --name owasp -dt zaproxy/zap-stable /bin/bash"
+                sh "docker exec owasp zap-baseline.py -t http://IP:3000/ -I -j --auto -r DAST_Report.html"
+                sh ''' docker cp owasp:/zap/wrk/DAST_Report.html ${WORKSPACE}/DAST_Report.html '''
+                sh "docker stop owasp"
+            }
+        }
+    }
+    post {
+        always {
+            // Archive both Trivy reports and ZAP report
+            archiveArtifacts artifacts: 'File_System_Scan_Report_Trivy.json, Container_Scan_Report_Trivy.html, DAST_Report.html', fingerprint: true
+        }
+    }
+}
+
+```
+
